@@ -9,10 +9,11 @@
 
 from __future__ import absolute_import
 
-import sys
 import importlib
+import sys
 
 from serial.serialutil import *
+
 #~ SerialBase, SerialException, to_bytes, iterbytes
 
 __version__ = '3.5'
@@ -24,11 +25,12 @@ if sys.platform == 'cli':
     from serial.serialcli import Serial
 else:
     import os
+
     # chose an implementation, depending on os
     if os.name == 'nt':  # sys.platform == 'win32':
         from serial.serialwin32 import Serial
     elif os.name == 'posix':
-        from serial.serialposix import Serial, PosixPollSerial, VTIMESerial  # noqa
+        from serial.serialposix import PosixPollSerial, Serial, VTIMESerial  # noqa
     elif os.name == 'java':
         from serial.serialjava import Serial
     else:
@@ -40,7 +42,7 @@ protocol_handler_packages = [
 ]
 
 
-def serial_for_url(url, *args, **kwargs):
+def serial_for_url(url: str, *args, **kwargs):
     """\
     Get an instance of the Serial class, depending on port/url. The port is not
     opened when the keyword parameter 'do_not_open' is true, by default it

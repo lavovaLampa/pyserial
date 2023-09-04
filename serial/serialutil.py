@@ -7,43 +7,27 @@
 #
 # SPDX-License-Identifier:    BSD-3-Clause
 
-from __future__ import absolute_import
+from __future__ import annotations
 
 import io
 import time
+from abc import ABC, abstractmethod, abstractproperty
+from enum import Enum
+from typing import Any, Final, Iterable, Optional, TypedDict
 
-# ``memoryview`` was introduced in Python 2.7 and ``bytes(some_memoryview)``
-# isn't returning the contents (very unfortunate). Therefore we need special
-# cases and test for it. Ensure that there is a ``memoryview`` object for older
-# Python versions. This is easier than making every test dependent on its
-# existence.
-try:
-    memoryview
-except (NameError, AttributeError):
-    # implementation does not matter as we do not really use it.
-    # it just must not inherit from something else we might care for.
-    class memoryview(object):   # pylint: disable=redefined-builtin,invalid-name
-        pass
+from _typeshed import WriteableBuffer
 
-try:
-    unicode
-except (NameError, AttributeError):
-    unicode = str       # for Python 3, pylint: disable=redefined-builtin,invalid-name
-
-try:
-    basestring
-except (NameError, AttributeError):
-    basestring = (str,)    # for Python 3, pylint: disable=redefined-builtin,invalid-name
+from serial.rs485 import RS485Settings
 
 
 # "for byte in data" fails for python3 as it returns ints instead of bytes
-def iterbytes(b):
+def iterbytes(b: bytes) -> Iterable[bytes]:
     """Iterate over bytes, returning bytes instead of ints (python3)"""
     if isinstance(b, memoryview):
         b = b.tobytes()
     i = 0
     while True:
-        a = b[i:i + 1]
+        a = b[i : i + 1]
         i += 1
         if a:
             yield a
@@ -53,7 +37,7 @@ def iterbytes(b):
 
 # all Python versions prior 3.x convert ``str([17])`` to '[17]' instead of '\x11'
 # so a simple ``bytes(sequence)`` doesn't work for all versions
-def to_bytes(seq):
+def to_bytes(seq: bytes | bytearray | memoryview | list[int]) -> bytes:
     """convert a sequence to a bytes type"""
     if isinstance(seq, bytes):
         return seq
@@ -61,32 +45,17 @@ def to_bytes(seq):
         return bytes(seq)
     elif isinstance(seq, memoryview):
         return seq.tobytes()
-    elif isinstance(seq, unicode):
-        raise TypeError('unicode strings are not supported, please encode to bytes: {!r}'.format(seq))
     else:
         # handle list of integers and bytes (one or more items) for Python 2 and 3
         return bytes(bytearray(seq))
 
 
 # create control bytes
-XON = to_bytes([17])
-XOFF = to_bytes([19])
+XON: Final = bytes([17])
+XOFF: Final = bytes([19])
 
-CR = to_bytes([13])
-LF = to_bytes([10])
-
-
-PARITY_NONE, PARITY_EVEN, PARITY_ODD, PARITY_MARK, PARITY_SPACE = 'N', 'E', 'O', 'M', 'S'
-STOPBITS_ONE, STOPBITS_ONE_POINT_FIVE, STOPBITS_TWO = (1, 1.5, 2)
-FIVEBITS, SIXBITS, SEVENBITS, EIGHTBITS = (5, 6, 7, 8)
-
-PARITY_NAMES = {
-    PARITY_NONE: 'None',
-    PARITY_EVEN: 'Even',
-    PARITY_ODD: 'Odd',
-    PARITY_MARK: 'Mark',
-    PARITY_SPACE: 'Space',
-}
+CR: Final = bytes([13])
+LF: Final = bytes([10])
 
 
 class SerialException(IOError):
@@ -99,11 +68,14 @@ class SerialTimeoutException(SerialException):
 
 class PortNotOpenError(SerialException):
     """Port is not open"""
+
     def __init__(self):
-        super(PortNotOpenError, self).__init__('Attempting to use a port that is not open')
+        super(PortNotOpenError, self).__init__(
+            "Attempting to use a port that is not open"
+        )
 
 
-class Timeout(object):
+class Timeout:
     """\
     Abstraction for timeout operations. Using time.monotonic() if available
     or time.time() in all other cases.
@@ -112,85 +84,121 @@ class Timeout(object):
     non-blocking and fully blocking I/O operations. The attributes
     is_non_blocking and is_infinite are set accordingly.
     """
-    if hasattr(time, 'monotonic'):
-        # Timeout implementation with time.monotonic(). This function is only
-        # supported by Python 3.3 and above. It returns a time in seconds
-        # (float) just as time.time(), but is not affected by system clock
-        # adjustments.
-        TIME = time.monotonic
-    else:
-        # Timeout implementation with time.time(). This is compatible with all
-        # Python versions but has issues if the clock is adjusted while the
-        # timeout is running.
-        TIME = time.time
 
-    def __init__(self, duration):
+    is_infinite: bool
+    is_non_blocking: bool
+    target_time: Optional[float]
+    duration: Optional[float | int]
+
+    def __init__(self, duration: Optional[int | float]):
         """Initialize a timeout with given duration"""
-        self.is_infinite = (duration is None)
-        self.is_non_blocking = (duration == 0)
+        self.is_infinite = duration is None
+        self.is_non_blocking = duration == 0
         self.duration = duration
         if duration is not None:
-            self.target_time = self.TIME() + duration
+            self.target_time = time.monotonic() + duration
         else:
             self.target_time = None
 
-    def expired(self):
+    def expired(self) -> bool:
         """Return a boolean, telling if the timeout has expired"""
         return self.target_time is not None and self.time_left() <= 0
 
-    def time_left(self):
+    def time_left(self) -> Optional[int | float]:
         """Return how many seconds are left until the timeout expires"""
         if self.is_non_blocking:
             return 0
         elif self.is_infinite:
             return None
         else:
-            delta = self.target_time - self.TIME()
+            delta = self.target_time - time.monotonic()
             if delta > self.duration:
                 # clock jumped, recalculate
-                self.target_time = self.TIME() + self.duration
+                self.target_time = time.monotonic() + self.duration
                 return self.duration
             else:
                 return max(0, delta)
 
-    def restart(self, duration):
+    def restart(self, duration: int | float) -> None:
         """\
         Restart a timeout, only supported if a timeout was already set up
         before.
         """
         self.duration = duration
-        self.target_time = self.TIME() + duration
+        self.target_time = time.monotonic() + duration
 
 
-class SerialBase(io.RawIOBase):
+class ByteSize(Enum):
+    FIVE_BITS = 5
+    SIX_BITS = 6
+    SEVEN_BITS = 7
+    EIGHT_BITS = 8
+
+
+class Parity(Enum):
+    NONE = "N"
+    EVEN = "E"
+    ODD = "O"
+    MARK = "M"
+    SPACE = "S"
+
+
+class StopBits(Enum):
+    ONE = 1
+    ONE_POINT_FIVE = 1.5
+    TWO = 2
+
+
+class SerialBase(ABC, io.RawIOBase):
     """\
     Serial port base class. Provides __init__ function and properties to
     get/set port settings.
     """
 
+    is_open: bool
+    portstr: Optional[str]
+    name: Optional[str]
+    _port: Optional[str]
+    _baudrate: int
+    _bytesize: ByteSize
+    _parity: Parity
+    _stopbits: StopBits
+    _timeout: Optional[int | float]
+    _write_timeout: Optional[int | float]
+    _xonxoff: bool
+    _rtscts: bool
+    _dsrdtr: bool
+    _inter_byte_timeout: Optional[Any]
+    _rs485_mode: Optional[RS485Settings]
+    _rts_state: bool
+    _dtr_state: bool
+    _break_state: bool
+    _exclusive: bool
+
     # default values, may be overridden in subclasses that do not support all values
+    # fmt: off
     BAUDRATES = (50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800,
                  9600, 19200, 38400, 57600, 115200, 230400, 460800, 500000,
                  576000, 921600, 1000000, 1152000, 1500000, 2000000, 2500000,
                  3000000, 3500000, 4000000)
-    BYTESIZES = (FIVEBITS, SIXBITS, SEVENBITS, EIGHTBITS)
-    PARITIES = (PARITY_NONE, PARITY_EVEN, PARITY_ODD, PARITY_MARK, PARITY_SPACE)
-    STOPBITS = (STOPBITS_ONE, STOPBITS_ONE_POINT_FIVE, STOPBITS_TWO)
+    # fmt: on
 
-    def __init__(self,
-                 port=None,
-                 baudrate=9600,
-                 bytesize=EIGHTBITS,
-                 parity=PARITY_NONE,
-                 stopbits=STOPBITS_ONE,
-                 timeout=None,
-                 xonxoff=False,
-                 rtscts=False,
-                 write_timeout=None,
-                 dsrdtr=False,
-                 inter_byte_timeout=None,
-                 exclusive=None,
-                 **kwargs):
+    def __init__(
+        self,
+        port: Optional[str] = None,
+        baudrate: int = 9600,
+        bytesize: ByteSize = ByteSize.EIGHT_BITS,
+        parity: Parity = Parity.NONE,
+        stopbits: StopBits = StopBits.ONE,
+        timeout: Optional[float] = None,
+        xonxoff: bool = False,
+        rtscts: bool = False,
+        write_timeout: Optional[float] = None,
+        dsrdtr: bool = False,
+        inter_byte_timeout: Optional[float] = None,
+        exclusive: bool = False,
+    ):
+
         """\
         Initialize comm port object. If a "port" is given, then the port will be
         opened immediately. Otherwise a Serial port object in closed state
@@ -202,21 +210,14 @@ class SerialBase(io.RawIOBase):
         self.name = None
         # correct values are assigned below through properties
         self._port = None
-        self._baudrate = None
-        self._bytesize = None
-        self._parity = None
-        self._stopbits = None
+        self._baudrate = 0
         self._timeout = None
         self._write_timeout = None
-        self._xonxoff = None
-        self._rtscts = None
-        self._dsrdtr = None
         self._inter_byte_timeout = None
         self._rs485_mode = None  # disabled by default
         self._rts_state = True
         self._dtr_state = True
         self._break_state = False
-        self._exclusive = None
 
         # assign values using get/set methods using the properties feature
         self.port = port
@@ -232,22 +233,40 @@ class SerialBase(io.RawIOBase):
         self.inter_byte_timeout = inter_byte_timeout
         self.exclusive = exclusive
 
-        # watch for backward compatible kwargs
-        if 'writeTimeout' in kwargs:
-            self.write_timeout = kwargs.pop('writeTimeout')
-        if 'interCharTimeout' in kwargs:
-            self.inter_byte_timeout = kwargs.pop('interCharTimeout')
-        if kwargs:
-            raise ValueError('unexpected keyword arguments: {!r}'.format(kwargs))
-
         if port is not None:
             self.open()
 
     #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
 
     # to be implemented by subclasses:
-    # def open(self):
-    # def close(self):
+
+    @abstractmethod
+    def open(self) -> None:
+        ...
+
+    @abstractmethod
+    def close(self) -> None:
+        ...
+
+    @abstractmethod
+    def _reconfigure_port(self, force_update: bool = ...) -> None:
+        ...
+
+    @abstractmethod
+    def _update_rts_state(self) -> None:
+        ...
+
+    @abstractmethod
+    def _update_dtr_state(self) -> None:
+        ...
+
+    @abstractmethod
+    def _update_break_state(self) -> None:
+        ...
+
+    @abstractproperty
+    def in_waiting(self) -> int:
+        ...
 
     #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
 
@@ -260,12 +279,10 @@ class SerialBase(io.RawIOBase):
         return self._port
 
     @port.setter
-    def port(self, port):
+    def port(self, port: Optional[str]) -> None:
         """\
         Change the port.
         """
-        if port is not None and not isinstance(port, basestring):
-            raise ValueError('"port" must be None or a string, not {}'.format(type(port)))
         was_open = self.is_open
         if was_open:
             self.close()
@@ -276,172 +293,146 @@ class SerialBase(io.RawIOBase):
             self.open()
 
     @property
-    def baudrate(self):
+    def baudrate(self) -> int:
         """Get the current baud rate setting."""
         return self._baudrate
 
     @baudrate.setter
-    def baudrate(self, baudrate):
+    def baudrate(self, baudrate: int) -> None:
         """\
         Change baud rate. It raises a ValueError if the port is open and the
         baud rate is not possible. If the port is closed, then the value is
         accepted and the exception is raised when the port is opened.
         """
-        try:
-            b = int(baudrate)
-        except TypeError:
-            raise ValueError("Not a valid baudrate: {!r}".format(baudrate))
-        else:
-            if b < 0:
-                raise ValueError("Not a valid baudrate: {!r}".format(baudrate))
-            self._baudrate = b
-            if self.is_open:
-                self._reconfigure_port()
+        if baudrate < 0:
+            raise ValueError(f"Not a valid baudrate: {baudrate:!r}")
+        self._baudrate = baudrate
+        if self.is_open:
+            self._reconfigure_port()
 
     @property
-    def bytesize(self):
+    def bytesize(self) -> ByteSize:
         """Get the current byte size setting."""
         return self._bytesize
 
     @bytesize.setter
-    def bytesize(self, bytesize):
+    def bytesize(self, bytesize: ByteSize):
         """Change byte size."""
-        if bytesize not in self.BYTESIZES:
-            raise ValueError("Not a valid byte size: {!r}".format(bytesize))
         self._bytesize = bytesize
         if self.is_open:
             self._reconfigure_port()
 
     @property
-    def exclusive(self):
+    def exclusive(self) -> bool:
         """Get the current exclusive access setting."""
         return self._exclusive
 
     @exclusive.setter
-    def exclusive(self, exclusive):
+    def exclusive(self, exclusive: bool):
         """Change the exclusive access setting."""
         self._exclusive = exclusive
         if self.is_open:
             self._reconfigure_port()
 
     @property
-    def parity(self):
+    def parity(self) -> Parity:
         """Get the current parity setting."""
         return self._parity
 
     @parity.setter
-    def parity(self, parity):
+    def parity(self, parity: Parity) -> None:
         """Change parity setting."""
-        if parity not in self.PARITIES:
-            raise ValueError("Not a valid parity: {!r}".format(parity))
         self._parity = parity
         if self.is_open:
             self._reconfigure_port()
 
     @property
-    def stopbits(self):
+    def stopbits(self) -> StopBits:
         """Get the current stop bits setting."""
         return self._stopbits
 
     @stopbits.setter
-    def stopbits(self, stopbits):
+    def stopbits(self, stopbits: StopBits):
         """Change stop bits size."""
-        if stopbits not in self.STOPBITS:
-            raise ValueError("Not a valid stop bit size: {!r}".format(stopbits))
         self._stopbits = stopbits
         if self.is_open:
             self._reconfigure_port()
 
     @property
-    def timeout(self):
+    def timeout(self) -> Optional[int | float]:
         """Get the current timeout setting."""
         return self._timeout
 
     @timeout.setter
-    def timeout(self, timeout):
+    def timeout(self, timeout: Optional[int | float]):
         """Change timeout setting."""
-        if timeout is not None:
-            try:
-                timeout + 1     # test if it's a number, will throw a TypeError if not...
-            except TypeError:
-                raise ValueError("Not a valid timeout: {!r}".format(timeout))
-            if timeout < 0:
-                raise ValueError("Not a valid timeout: {!r}".format(timeout))
+        if timeout is not None and timeout < 0:
+            raise ValueError(f"Not a valid timeout: {timeout:!r}")
         self._timeout = timeout
         if self.is_open:
             self._reconfigure_port()
 
     @property
-    def write_timeout(self):
+    def write_timeout(self) -> Optional[int | float]:
         """Get the current timeout setting."""
         return self._write_timeout
 
     @write_timeout.setter
-    def write_timeout(self, timeout):
+    def write_timeout(self, timeout: Optional[int | float]) -> None:
         """Change timeout setting."""
-        if timeout is not None:
-            if timeout < 0:
-                raise ValueError("Not a valid timeout: {!r}".format(timeout))
-            try:
-                timeout + 1     # test if it's a number, will throw a TypeError if not...
-            except TypeError:
-                raise ValueError("Not a valid timeout: {!r}".format(timeout))
+        if timeout is not None and timeout < 0:
+            raise ValueError(f"Not a valid timeout: {timeout:!r}")
 
         self._write_timeout = timeout
         if self.is_open:
             self._reconfigure_port()
 
     @property
-    def inter_byte_timeout(self):
+    def inter_byte_timeout(self) -> Optional[int | float]:
         """Get the current inter-character timeout setting."""
         return self._inter_byte_timeout
 
     @inter_byte_timeout.setter
-    def inter_byte_timeout(self, ic_timeout):
+    def inter_byte_timeout(self, ic_timeout: Optional[int | float]) -> None:
         """Change inter-byte timeout setting."""
-        if ic_timeout is not None:
-            if ic_timeout < 0:
-                raise ValueError("Not a valid timeout: {!r}".format(ic_timeout))
-            try:
-                ic_timeout + 1     # test if it's a number, will throw a TypeError if not...
-            except TypeError:
-                raise ValueError("Not a valid timeout: {!r}".format(ic_timeout))
+        if ic_timeout is not None and ic_timeout < 0:
+            raise ValueError(f"Not a valid timeout: {ic_timeout:!r}")
 
         self._inter_byte_timeout = ic_timeout
         if self.is_open:
             self._reconfigure_port()
 
     @property
-    def xonxoff(self):
+    def xonxoff(self) -> bool:
         """Get the current XON/XOFF setting."""
         return self._xonxoff
 
     @xonxoff.setter
-    def xonxoff(self, xonxoff):
+    def xonxoff(self, xonxoff: bool) -> None:
         """Change XON/XOFF setting."""
         self._xonxoff = xonxoff
         if self.is_open:
             self._reconfigure_port()
 
     @property
-    def rtscts(self):
+    def rtscts(self) -> bool:
         """Get the current RTS/CTS flow control setting."""
         return self._rtscts
 
     @rtscts.setter
-    def rtscts(self, rtscts):
+    def rtscts(self, rtscts: bool) -> None:
         """Change RTS/CTS flow control setting."""
         self._rtscts = rtscts
         if self.is_open:
             self._reconfigure_port()
 
     @property
-    def dsrdtr(self):
+    def dsrdtr(self) -> bool:
         """Get the current DSR/DTR flow control setting."""
         return self._dsrdtr
 
     @dsrdtr.setter
-    def dsrdtr(self, dsrdtr=None):
+    def dsrdtr(self, dsrdtr: Optional[bool] = None) -> None:
         """Change DsrDtr flow control setting."""
         if dsrdtr is None:
             # if not set, keep backwards compatibility and follow rtscts setting
@@ -453,31 +444,31 @@ class SerialBase(io.RawIOBase):
             self._reconfigure_port()
 
     @property
-    def rts(self):
+    def rts(self) -> bool:
         return self._rts_state
 
     @rts.setter
-    def rts(self, value):
+    def rts(self, value: bool) -> None:
         self._rts_state = value
         if self.is_open:
             self._update_rts_state()
 
     @property
-    def dtr(self):
+    def dtr(self) -> bool:
         return self._dtr_state
 
     @dtr.setter
-    def dtr(self, value):
+    def dtr(self, value: bool) -> None:
         self._dtr_state = value
         if self.is_open:
             self._update_dtr_state()
 
     @property
-    def break_condition(self):
+    def break_condition(self) -> bool:
         return self._break_state
 
     @break_condition.setter
-    def break_condition(self, value):
+    def break_condition(self, value: bool) -> None:
         self._break_state = value
         if self.is_open:
             self._update_break_state()
@@ -486,7 +477,7 @@ class SerialBase(io.RawIOBase):
     # functions useful for RS-485 adapters
 
     @property
-    def rs485_mode(self):
+    def rs485_mode(self) -> Optional[RS485Settings]:
         """\
         Enable RS485 mode and apply new settings, set to None to disable.
         See serial.rs485.RS485Settings for more info about the value.
@@ -494,43 +485,56 @@ class SerialBase(io.RawIOBase):
         return self._rs485_mode
 
     @rs485_mode.setter
-    def rs485_mode(self, rs485_settings):
+    def rs485_mode(self, rs485_settings: Optional[RS485Settings]):
         self._rs485_mode = rs485_settings
         if self.is_open:
             self._reconfigure_port()
 
     #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
 
-    _SAVED_SETTINGS = ('baudrate', 'bytesize', 'parity', 'stopbits', 'xonxoff',
-                       'dsrdtr', 'rtscts', 'timeout', 'write_timeout',
-                       'inter_byte_timeout')
+    class SavedSettings(TypedDict, total=True):
+        baudrate: int
+        bytesize: ByteSize
+        parity: Parity
+        stopbits: StopBits
+        xonxoff: bool
+        dsrdtr: bool
+        rtscts: bool
+        timeout: Optional[int | float]
+        write_timeout: Optional[int | float]
+        inter_byte_timeout: Optional[int | float]
 
-    def get_settings(self):
+    def get_settings(self) -> SavedSettings:
         """\
         Get current port settings as a dictionary. For use with
         apply_settings().
         """
-        return dict([(key, getattr(self, '_' + key)) for key in self._SAVED_SETTINGS])
+        return dict([(key, getattr(self, "_" + key)) for key in self._SAVED_SETTINGS])
 
-    def apply_settings(self, d):
+    def apply_settings(self, d: SavedSettings) -> None:
         """\
         Apply stored settings from a dictionary returned from
         get_settings(). It's allowed to delete keys from the dictionary. These
         values will simply left unchanged.
         """
-        for key in self._SAVED_SETTINGS:
-            if key in d and d[key] != getattr(self, '_' + key):   # check against internal "_" value
-                setattr(self, key, d[key])          # set non "_" value to use properties write function
+        for key, val in d.items():
+            if val != getattr(self, "_" + key):  # check against internal "_" value
+                setattr(
+                    self, key, val
+                )  # set non "_" value to use properties write function
 
     #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """String representation of the current port settings and its state."""
-        return '{name}<id=0x{id:x}, open={p.is_open}>(port={p.portstr!r}, ' \
-               'baudrate={p.baudrate!r}, bytesize={p.bytesize!r}, parity={p.parity!r}, ' \
-               'stopbits={p.stopbits!r}, timeout={p.timeout!r}, xonxoff={p.xonxoff!r}, ' \
-               'rtscts={p.rtscts!r}, dsrdtr={p.dsrdtr!r})'.format(
-                   name=self.__class__.__name__, id=id(self), p=self)
+        return (
+            "{name}<id=0x{id:x}, open={p.is_open}>(port={p.portstr!r}, "
+            "baudrate={p.baudrate!r}, bytesize={p.bytesize!r}, parity={p.parity!r}, "
+            "stopbits={p.stopbits!r}, timeout={p.timeout!r}, xonxoff={p.xonxoff!r}, "
+            "rtscts={p.rtscts!r}, dsrdtr={p.dsrdtr!r})".format(
+                name=self.__class__.__name__, id=id(self), p=self
+            )
+        )
 
     #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
     # compatibility with io library
@@ -545,16 +549,18 @@ class SerialBase(io.RawIOBase):
     def seekable(self):
         return False
 
-    def readinto(self, b):
+    def readinto(self, b: WriteableBuffer) -> int:
         data = self.read(len(b))
+        assert data is not None
         n = len(data)
         try:
             b[:n] = data
         except TypeError as err:
             import array
+
             if not isinstance(b, array.array):
                 raise err
-            b[:n] = array.array('b', data)
+            b[:n] = array.array("b", data)
         return n
 
     #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
@@ -570,7 +576,7 @@ class SerialBase(io.RawIOBase):
 
     #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
 
-    def send_break(self, duration=0.25):
+    def send_break(self, duration: float = 0.25) -> None:
         """\
         Send break condition. Timed, returns to idle state after given
         duration.
@@ -582,67 +588,6 @@ class SerialBase(io.RawIOBase):
         self.break_condition = False
 
     #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
-    # backwards compatibility / deprecated functions
-
-    def flushInput(self):
-        self.reset_input_buffer()
-
-    def flushOutput(self):
-        self.reset_output_buffer()
-
-    def inWaiting(self):
-        return self.in_waiting
-
-    def sendBreak(self, duration=0.25):
-        self.send_break(duration)
-
-    def setRTS(self, value=1):
-        self.rts = value
-
-    def setDTR(self, value=1):
-        self.dtr = value
-
-    def getCTS(self):
-        return self.cts
-
-    def getDSR(self):
-        return self.dsr
-
-    def getRI(self):
-        return self.ri
-
-    def getCD(self):
-        return self.cd
-
-    def setPort(self, port):
-        self.port = port
-
-    @property
-    def writeTimeout(self):
-        return self.write_timeout
-
-    @writeTimeout.setter
-    def writeTimeout(self, timeout):
-        self.write_timeout = timeout
-
-    @property
-    def interCharTimeout(self):
-        return self.inter_byte_timeout
-
-    @interCharTimeout.setter
-    def interCharTimeout(self, interCharTimeout):
-        self.inter_byte_timeout = interCharTimeout
-
-    def getSettingsDict(self):
-        return self.get_settings()
-
-    def applySettingsDict(self, d):
-        self.apply_settings(d)
-
-    def isOpen(self):
-        return self.is_open
-
-    #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
     # additional functionality
 
     def read_all(self):
@@ -651,7 +596,7 @@ class SerialBase(io.RawIOBase):
         """
         return self.read(self.in_waiting)
 
-    def read_until(self, expected=LF, size=None):
+    def read_until(self, expected: bytes = LF, size: Optional[int] = None):
         """\
         Read until an expected sequence is found (line feed by default), the size
         is exceeded or until timeout occurs.
@@ -673,25 +618,28 @@ class SerialBase(io.RawIOBase):
                 break
         return bytes(line)
 
-    def iread_until(self, *args, **kwargs):
+    def iread_until(
+        self, expected: bytes = LF, size: Optional[int] = None
+    ) -> Iterable[bytes]:
         """\
         Read lines, implemented as generator. It will raise StopIteration on
         timeout (empty read).
         """
         while True:
-            line = self.read_until(*args, **kwargs)
+            line = self.read_until(expected, size)
             if not line:
                 break
             yield line
 
 
 #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
-if __name__ == '__main__':
+if __name__ == "__main__":
     import sys
+
     s = SerialBase()
-    sys.stdout.write('port name:  {}\n'.format(s.name))
-    sys.stdout.write('baud rates: {}\n'.format(s.BAUDRATES))
-    sys.stdout.write('byte sizes: {}\n'.format(s.BYTESIZES))
-    sys.stdout.write('parities:   {}\n'.format(s.PARITIES))
-    sys.stdout.write('stop bits:  {}\n'.format(s.STOPBITS))
-    sys.stdout.write('{}\n'.format(s))
+    sys.stdout.write("port name:  {}\n".format(s.name))
+    sys.stdout.write("baud rates: {}\n".format(s.BAUDRATES))
+    sys.stdout.write("byte sizes: {}\n".format(s.BYTESIZES))
+    sys.stdout.write("parities:   {}\n".format(s.PARITIES))
+    sys.stdout.write("stop bits:  {}\n".format(s.STOPBITS))
+    sys.stdout.write("{}\n".format(s))

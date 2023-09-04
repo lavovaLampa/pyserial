@@ -7,12 +7,11 @@
 #
 # SPDX-License-Identifier:    BSD-3-Clause
 
-from __future__ import absolute_import
-
 import codecs
 import os
 import sys
 import threading
+from typing import Any, Optional
 
 import serial
 from serial.tools.list_ports import comports
@@ -21,14 +20,6 @@ from serial.tools import hexlify_codec
 # pylint: disable=wrong-import-order,wrong-import-position
 
 codecs.register(lambda c: hexlify_codec.getregentry() if c == 'hexlify' else None)
-
-try:
-    raw_input
-except NameError:
-    # pylint: disable=redefined-builtin,invalid-name
-    raw_input = input   # in python3 it's "raw"
-    unichr = chr
-
 
 def key_description(character):
     """generate a readable description for a key"""
@@ -820,7 +811,7 @@ class Miniterm(object):
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # default args can be used to override when calling main() from an other script
 # e.g to create a miniterm-my-device.py
-def main(default_port=None, default_baudrate=9600, default_rts=None, default_dtr=None, serial_instance=None):
+def main(default_port: Optional[str]=None, default_baudrate: int=9600, default_rts: Optional[bool]=None, default_dtr: Optional[bool]=None, serial_instance: Optional[Any]=None):
     """Command line tool, entry point"""
 
     import argparse

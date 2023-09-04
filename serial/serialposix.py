@@ -26,7 +26,7 @@
 # - aix (AIX)               /dev/tty%d
 
 
-from __future__ import absolute_import
+from __future__ import annotations
 
 # pylint: disable=abstract-method
 import errno
@@ -37,36 +37,58 @@ import select
 import struct
 import sys
 import termios
+from abc import ABC, abstractmethod
+from typing import Final, List, Mapping, Optional
+
+from _typeshed import ReadableBuffer
 
 import serial
-from serial.serialutil import SerialBase, SerialException, to_bytes, \
-    PortNotOpenError, SerialTimeoutException, Timeout
+from serial.rs485 import RS485Settings
+from serial.serialutil import (
+    ByteSize,
+    Parity,
+    PortNotOpenError,
+    SerialBase,
+    SerialException,
+    SerialTimeoutException,
+    StopBits,
+    Timeout,
+    to_bytes,
+)
 
 
-class PlatformSpecificBase(object):
-    BAUDRATE_CONSTANTS = {}
+class PlatformSpecificBase(ABC):
+    _break_state: bool
+    fd: Optional[int]
 
-    def _set_special_baudrate(self, baudrate):
-        raise NotImplementedError('non-standard baudrates are not supported on this platform')
+    BAUDRATE_CONSTANTS: Mapping[int, int] = {}
 
-    def _set_rs485_mode(self, rs485_settings):
-        raise NotImplementedError('RS485 not supported on this platform')
+    @abstractmethod
+    def _set_special_baudrate(self, baudrate: int) -> None:
+        raise NotImplementedError(
+            "non-standard baudrates are not supported on this platform"
+        )
 
-    def set_low_latency_mode(self, low_latency_settings):
-        raise NotImplementedError('Low latency not supported on this platform')
+    @abstractmethod
+    def _set_rs485_mode(self, rs485_settings: RS485Settings) -> None:
+        raise NotImplementedError("RS485 not supported on this platform")
+
+    @abstractmethod
+    def set_low_latency_mode(self, low_latency_settings: bool) -> None:
+        raise NotImplementedError("Low latency not supported on this platform")
 
     def _update_break_state(self):
-        """\
+        """
         Set break: Controls TXD. When active, no transmitting is possible.
         """
         if self._break_state:
             fcntl.ioctl(self.fd, TIOCSBRK)
         else:
             fcntl.ioctl(self.fd, TIOCCBRK)
-    
+
 
 # some systems support an extra flag to enable the two in POSIX unsupported
-# paritiy settings for MARK and SPACE
+# parity settings for MARK and SPACE
 CMSPAR = 0  # default, for unsupported platforms, override below
 
 # try to detect the OS so that a device can be selected...
@@ -74,7 +96,7 @@ CMSPAR = 0  # default, for unsupported platforms, override below
 # for the platform
 plat = sys.platform.lower()
 
-if plat[:5] == 'linux':    # Linux (confirmed)  # noqa
+if plat[:5] == "linux":  # Linux (confirmed)  # noqa
     import array
 
     # extra termios flags
@@ -101,29 +123,29 @@ if plat[:5] == 'linux':    # Linux (confirmed)  # noqa
 
     class PlatformSpecific(PlatformSpecificBase):
         BAUDRATE_CONSTANTS = {
-            0:       0o000000,  # hang up
-            50:      0o000001,
-            75:      0o000002,
-            110:     0o000003,
-            134:     0o000004,
-            150:     0o000005,
-            200:     0o000006,
-            300:     0o000007,
-            600:     0o000010,
-            1200:    0o000011,
-            1800:    0o000012,
-            2400:    0o000013,
-            4800:    0o000014,
-            9600:    0o000015,
-            19200:   0o000016,
-            38400:   0o000017,
-            57600:   0o010001,
-            115200:  0o010002,
-            230400:  0o010003,
-            460800:  0o010004,
-            500000:  0o010005,
-            576000:  0o010006,
-            921600:  0o010007,
+            0: 0o000000,  # hang up
+            50: 0o000001,
+            75: 0o000002,
+            110: 0o000003,
+            134: 0o000004,
+            150: 0o000005,
+            200: 0o000006,
+            300: 0o000007,
+            600: 0o000010,
+            1200: 0o000011,
+            1800: 0o000012,
+            2400: 0o000013,
+            4800: 0o000014,
+            9600: 0o000015,
+            19200: 0o000016,
+            38400: 0o000017,
+            57600: 0o010001,
+            115200: 0o010002,
+            230400: 0o010003,
+            460800: 0o010004,
+            500000: 0o010005,
+            576000: 0o010006,
+            921600: 0o010007,
             1000000: 0o010010,
             1152000: 0o010011,
             1500000: 0o010012,
@@ -131,11 +153,11 @@ if plat[:5] == 'linux':    # Linux (confirmed)  # noqa
             2500000: 0o010014,
             3000000: 0o010015,
             3500000: 0o010016,
-            4000000: 0o010017
+            4000000: 0o010017,
         }
 
-        def set_low_latency_mode(self, low_latency_settings):
-            buf = array.array('i', [0] * 32)
+        def set_low_latency_mode(self, low_latency_settings: bool) -> None:
+            buf = array.array("i", [0] * 32)
 
             try:
                 # get serial_struct
@@ -150,11 +172,13 @@ if plat[:5] == 'linux':    # Linux (confirmed)  # noqa
                 # set serial_struct
                 fcntl.ioctl(self.fd, termios.TIOCSSERIAL, buf)
             except IOError as e:
-                raise ValueError('Failed to update ASYNC_LOW_LATENCY flag to {}: {}'.format(low_latency_settings, e))
+                raise ValueError(
+                    f"Failed to update ASYNC_LOW_LATENCY flag to {low_latency_settings}: {e}"
+                )
 
-        def _set_special_baudrate(self, baudrate):
+        def _set_special_baudrate(self, baudrate: int) -> None:
             # right size is 44 on x86_64, allow for some growth
-            buf = array.array('i', [0] * 64)
+            buf = array.array("i", [0] * 64)
             try:
                 # get serial_struct
                 fcntl.ioctl(self.fd, TCGETS2, buf)
@@ -166,10 +190,10 @@ if plat[:5] == 'linux':    # Linux (confirmed)  # noqa
                 # set serial_struct
                 fcntl.ioctl(self.fd, TCSETS2, buf)
             except IOError as e:
-                raise ValueError('Failed to set custom baud rate ({}): {}'.format(baudrate, e))
+                raise ValueError(f"Failed to set custom baud rate ({baudrate}): {e}")
 
-        def _set_rs485_mode(self, rs485_settings):
-            buf = array.array('i', [0] * 8)  # flags, delaytx, delayrx, padding
+        def _set_rs485_mode(self, rs485_settings: RS485Settings) -> None:
+            buf = array.array("i", [0] * 8)  # flags, delaytx, delayrx, padding
             try:
                 fcntl.ioctl(self.fd, TIOCGRS485, buf)
                 buf[0] |= SER_RS485_ENABLED
@@ -194,10 +218,9 @@ if plat[:5] == 'linux':    # Linux (confirmed)  # noqa
                     buf[0] = 0  # clear SER_RS485_ENABLED
                 fcntl.ioctl(self.fd, TIOCSRS485, buf)
             except IOError as e:
-                raise ValueError('Failed to set RS485 mode: {}'.format(e))
+                raise ValueError("Failed to set RS485 mode: {}".format(e))
 
-
-elif plat == 'cygwin':       # cygwin/win32 (confirmed)
+elif plat == "cygwin":  # cygwin/win32 (confirmed)
 
     class PlatformSpecific(PlatformSpecificBase):
         BAUDRATE_CONSTANTS = {
@@ -206,47 +229,50 @@ elif plat == 'cygwin':       # cygwin/win32 (confirmed)
             500000: 0x01007,
             576000: 0x01008,
             921600: 0x01009,
-            1000000: 0x0100a,
-            1152000: 0x0100b,
-            1500000: 0x0100c,
-            2000000: 0x0100d,
-            2500000: 0x0100e,
-            3000000: 0x0100f
+            1000000: 0x0100A,
+            1152000: 0x0100B,
+            1500000: 0x0100C,
+            2000000: 0x0100D,
+            2500000: 0x0100E,
+            3000000: 0x0100F,
         }
 
-
-elif plat[:6] == 'darwin':   # OS X
+elif plat[:6] == "darwin":  # OS X
     import array
+
     IOSSIOSPEED = 0x80045402  # _IOW('T', 2, speed_t)
 
     class PlatformSpecific(PlatformSpecificBase):
-        osx_version = os.uname()[2].split('.')
-        TIOCSBRK = 0x2000747B # _IO('t', 123)
-        TIOCCBRK = 0x2000747A # _IO('t', 122)
+        osx_version = os.uname()[2].split(".")
+        TIOCSBRK = 0x2000747B  # _IO('t', 123)
+        TIOCCBRK = 0x2000747A  # _IO('t', 122)
 
         # Tiger or above can support arbitrary serial speeds
         if int(osx_version[0]) >= 8:
-            def _set_special_baudrate(self, baudrate):
+
+            def _set_special_baudrate(self, baudrate: int) -> None:
                 # use IOKit-specific call to set up high speeds
-                buf = array.array('i', [baudrate])
-                fcntl.ioctl(self.fd, IOSSIOSPEED, buf, 1)
+                buf = array.array("i", [baudrate])
+                fcntl.ioctl(self.fd, IOSSIOSPEED, buf, True)
 
         def _update_break_state(self):
             """\
             Set break: Controls TXD. When active, no transmitting is possible.
             """
             if self._break_state:
-                fcntl.ioctl(self.fd, PlatformSpecific.TIOCSBRK)
+                fcntl.ioctl(self.fd, self.TIOCSBRK)
             else:
-                fcntl.ioctl(self.fd, PlatformSpecific.TIOCCBRK)
+                fcntl.ioctl(self.fd, self.TIOCCBRK)
 
-elif plat[:3] == 'bsd' or \
-     plat[:7] == 'freebsd' or \
-     plat[:6] == 'netbsd' or \
-     plat[:7] == 'openbsd':
+elif (
+    plat[:3] == "bsd"
+    or plat[:7] == "freebsd"
+    or plat[:6] == "netbsd"
+    or plat[:7] == "openbsd"
+):
 
-    class ReturnBaudrate(object):
-        def __getitem__(self, key):
+    class ReturnBaudrate:
+        def __getitem__(self, key: int):
             return key
 
     class PlatformSpecific(PlatformSpecificBase):
@@ -255,57 +281,57 @@ elif plat[:3] == 'bsd' or \
         # a literal value.
         BAUDRATE_CONSTANTS = ReturnBaudrate()
 
-        TIOCSBRK = 0x2000747B # _IO('t', 123)
-        TIOCCBRK = 0x2000747A # _IO('t', 122)
+        TIOCSBRK = 0x2000747B  # _IO('t', 123)
+        TIOCCBRK = 0x2000747A  # _IO('t', 122)
 
-        
         def _update_break_state(self):
             """\
             Set break: Controls TXD. When active, no transmitting is possible.
             """
             if self._break_state:
-                fcntl.ioctl(self.fd, PlatformSpecific.TIOCSBRK)
+                fcntl.ioctl(self.fd, self.TIOCSBRK)
             else:
-                fcntl.ioctl(self.fd, PlatformSpecific.TIOCCBRK)
+                fcntl.ioctl(self.fd, self.TIOCCBRK)
 
 else:
+
     class PlatformSpecific(PlatformSpecificBase):
         pass
 
 
 # load some constants for later use.
 # try to use values from termios, use defaults from linux otherwise
-TIOCMGET = getattr(termios, 'TIOCMGET', 0x5415)
-TIOCMBIS = getattr(termios, 'TIOCMBIS', 0x5416)
-TIOCMBIC = getattr(termios, 'TIOCMBIC', 0x5417)
-TIOCMSET = getattr(termios, 'TIOCMSET', 0x5418)
+TIOCMGET = getattr(termios, "TIOCMGET", 0x5415)
+TIOCMBIS = getattr(termios, "TIOCMBIS", 0x5416)
+TIOCMBIC = getattr(termios, "TIOCMBIC", 0x5417)
+TIOCMSET = getattr(termios, "TIOCMSET", 0x5418)
 
 # TIOCM_LE = getattr(termios, 'TIOCM_LE', 0x001)
-TIOCM_DTR = getattr(termios, 'TIOCM_DTR', 0x002)
-TIOCM_RTS = getattr(termios, 'TIOCM_RTS', 0x004)
+TIOCM_DTR = getattr(termios, "TIOCM_DTR", 0x002)
+TIOCM_RTS = getattr(termios, "TIOCM_RTS", 0x004)
 # TIOCM_ST = getattr(termios, 'TIOCM_ST', 0x008)
 # TIOCM_SR = getattr(termios, 'TIOCM_SR', 0x010)
 
-TIOCM_CTS = getattr(termios, 'TIOCM_CTS', 0x020)
-TIOCM_CAR = getattr(termios, 'TIOCM_CAR', 0x040)
-TIOCM_RNG = getattr(termios, 'TIOCM_RNG', 0x080)
-TIOCM_DSR = getattr(termios, 'TIOCM_DSR', 0x100)
-TIOCM_CD = getattr(termios, 'TIOCM_CD', TIOCM_CAR)
-TIOCM_RI = getattr(termios, 'TIOCM_RI', TIOCM_RNG)
+TIOCM_CTS = getattr(termios, "TIOCM_CTS", 0x020)
+TIOCM_CAR = getattr(termios, "TIOCM_CAR", 0x040)
+TIOCM_RNG = getattr(termios, "TIOCM_RNG", 0x080)
+TIOCM_DSR = getattr(termios, "TIOCM_DSR", 0x100)
+TIOCM_CD = getattr(termios, "TIOCM_CD", TIOCM_CAR)
+TIOCM_RI = getattr(termios, "TIOCM_RI", TIOCM_RNG)
 # TIOCM_OUT1 = getattr(termios, 'TIOCM_OUT1', 0x2000)
 # TIOCM_OUT2 = getattr(termios, 'TIOCM_OUT2', 0x4000)
-if hasattr(termios, 'TIOCINQ'):
+if hasattr(termios, "TIOCINQ"):
     TIOCINQ = termios.TIOCINQ
 else:
-    TIOCINQ = getattr(termios, 'FIONREAD', 0x541B)
-TIOCOUTQ = getattr(termios, 'TIOCOUTQ', 0x5411)
+    TIOCINQ = getattr(termios, "FIONREAD", 0x541B)
+TIOCOUTQ = getattr(termios, "TIOCOUTQ", 0x5411)
 
-TIOCM_zero_str = struct.pack('I', 0)
-TIOCM_RTS_str = struct.pack('I', TIOCM_RTS)
-TIOCM_DTR_str = struct.pack('I', TIOCM_DTR)
+TIOCM_zero_str = struct.pack("I", 0)
+TIOCM_RTS_str = struct.pack("I", TIOCM_RTS)
+TIOCM_DTR_str = struct.pack("I", TIOCM_DTR)
 
-TIOCSBRK = getattr(termios, 'TIOCSBRK', 0x5427)
-TIOCCBRK = getattr(termios, 'TIOCCBRK', 0x5428)
+TIOCSBRK = getattr(termios, "TIOCSBRK", 0x5427)
+TIOCCBRK = getattr(termios, "TIOCCBRK", 0x5428)
 
 
 class Serial(SerialBase, PlatformSpecific):
@@ -315,7 +341,7 @@ class Serial(SerialBase, PlatformSpecific):
     systems.
     """
 
-    def open(self):
+    def open(self) -> None:
         """\
         Open port with current settings. This may throw a SerialException
         if the port cannot be opened."""
@@ -329,8 +355,10 @@ class Serial(SerialBase, PlatformSpecific):
             self.fd = os.open(self.portstr, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         except OSError as msg:
             self.fd = None
-            raise SerialException(msg.errno, "could not open port {}: {}".format(self._port, msg))
-        #~ fcntl.fcntl(self.fd, fcntl.F_SETFL, 0)  # set blocking
+            raise SerialException(
+                msg.errno, "could not open port {}: {}".format(self._port, msg)
+            )
+        # ~ fcntl.fcntl(self.fd, fcntl.F_SETFL, 0)  # set blocking
 
         self.pipe_abort_read_r, self.pipe_abort_read_w = None, None
         self.pipe_abort_write_r, self.pipe_abort_write_w = None, None
@@ -380,7 +408,7 @@ class Serial(SerialBase, PlatformSpecific):
 
         self.is_open = True
 
-    def _reconfigure_port(self, force_update=False):
+    def _reconfigure_port(self, force_update: bool = False) -> None:
         """Set communication parameters on opened port."""
         if self.fd is None:
             raise SerialException("Can only operate on a valid file descriptor")
@@ -391,45 +419,56 @@ class Serial(SerialBase, PlatformSpecific):
                 try:
                     fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except IOError as msg:
-                    raise SerialException(msg.errno, "Could not exclusively lock port {}: {}".format(self._port, msg))
+                    raise SerialException(
+                        msg.errno,
+                        "Could not exclusively lock port {}: {}".format(
+                            self._port, msg
+                        ),
+                    )
             else:
                 fcntl.flock(self.fd, fcntl.LOCK_UN)
 
         custom_baud = None
 
-        vmin = vtime = 0                # timeout is done via select
+        vmin = vtime = 0  # timeout is done via select
         if self._inter_byte_timeout is not None:
             vmin = 1
             vtime = int(self._inter_byte_timeout * 10)
         try:
             orig_attr = termios.tcgetattr(self.fd)
             iflag, oflag, cflag, lflag, ispeed, ospeed, cc = orig_attr
-        except termios.error as msg:      # if a port is nonexistent but has a /dev file, it'll fail here
+        except termios.error as msg:  # if a port is nonexistent but has a /dev file, it'll fail here
             raise SerialException("Could not configure port: {}".format(msg))
         # set up raw mode / no echo / binary
-        cflag |= (termios.CLOCAL | termios.CREAD)
-        lflag &= ~(termios.ICANON | termios.ECHO | termios.ECHOE |
-                   termios.ECHOK | termios.ECHONL |
-                   termios.ISIG | termios.IEXTEN)  # |termios.ECHOPRT
-        for flag in ('ECHOCTL', 'ECHOKE'):  # netbsd workaround for Erk
+        cflag |= termios.CLOCAL | termios.CREAD
+        lflag &= ~(
+            termios.ICANON
+            | termios.ECHO
+            | termios.ECHOE
+            | termios.ECHOK
+            | termios.ECHONL
+            | termios.ISIG
+            | termios.IEXTEN
+        )  # |termios.ECHOPRT
+        for flag in ("ECHOCTL", "ECHOKE"):  # netbsd workaround for Erk
             if hasattr(termios, flag):
                 lflag &= ~getattr(termios, flag)
 
         oflag &= ~(termios.OPOST | termios.ONLCR | termios.OCRNL)
         iflag &= ~(termios.INLCR | termios.IGNCR | termios.ICRNL | termios.IGNBRK)
-        if hasattr(termios, 'IUCLC'):
+        if hasattr(termios, "IUCLC"):
             iflag &= ~termios.IUCLC
-        if hasattr(termios, 'PARMRK'):
+        if hasattr(termios, "PARMRK"):
             iflag &= ~termios.PARMRK
 
         # setup baud rate
         try:
-            ispeed = ospeed = getattr(termios, 'B{}'.format(self._baudrate))
+            ispeed = ospeed = getattr(termios, "B{}".format(self._baudrate))
         except AttributeError:
             try:
                 ispeed = ospeed = self.BAUDRATE_CONSTANTS[self._baudrate]
             except KeyError:
-                #~ raise ValueError('Invalid baud rate: %r' % self._baudrate)
+                # ~ raise ValueError('Invalid baud rate: %r' % self._baudrate)
 
                 # See if BOTHER is defined for this platform; if it is, use
                 # this for a speed not defined in the baudrate constants list.
@@ -437,75 +476,81 @@ class Serial(SerialBase, PlatformSpecific):
                     ispeed = ospeed = BOTHER
                 except NameError:
                     # may need custom baud rate, it isn't in our list.
-                    ispeed = ospeed = getattr(termios, 'B38400')
+                    ispeed = ospeed = getattr(termios, "B38400")
 
                 try:
                     custom_baud = int(self._baudrate)  # store for later
                 except ValueError:
-                    raise ValueError('Invalid baud rate: {!r}'.format(self._baudrate))
+                    raise ValueError("Invalid baud rate: {!r}".format(self._baudrate))
                 else:
                     if custom_baud < 0:
-                        raise ValueError('Invalid baud rate: {!r}'.format(self._baudrate))
+                        raise ValueError(
+                            "Invalid baud rate: {!r}".format(self._baudrate)
+                        )
 
         # setup char len
         cflag &= ~termios.CSIZE
-        if self._bytesize == 8:
+        if self._bytesize == ByteSize.EIGHT_BITS:
             cflag |= termios.CS8
-        elif self._bytesize == 7:
+        elif self._bytesize == ByteSize.SEVEN_BITS:
             cflag |= termios.CS7
-        elif self._bytesize == 6:
+        elif self._bytesize == ByteSize.SIX_BITS:
             cflag |= termios.CS6
-        elif self._bytesize == 5:
+        elif self._bytesize == ByteSize.FIVE_BITS:
             cflag |= termios.CS5
         else:
-            raise ValueError('Invalid char len: {!r}'.format(self._bytesize))
+            raise ValueError("Invalid char len: {!r}".format(self._bytesize))
         # setup stop bits
-        if self._stopbits == serial.STOPBITS_ONE:
+        if self._stopbits == StopBits.ONE:
             cflag &= ~(termios.CSTOPB)
-        elif self._stopbits == serial.STOPBITS_ONE_POINT_FIVE:
-            cflag |= (termios.CSTOPB)  # XXX same as TWO.. there is no POSIX support for 1.5
-        elif self._stopbits == serial.STOPBITS_TWO:
-            cflag |= (termios.CSTOPB)
+        elif self._stopbits == StopBits.ONE_POINT_FIVE:
+            cflag |= (
+                termios.CSTOPB
+            )  # XXX same as TWO.. there is no POSIX support for 1.5
+        elif self._stopbits == StopBits.TWO:
+            cflag |= termios.CSTOPB
         else:
-            raise ValueError('Invalid stop bit specification: {!r}'.format(self._stopbits))
+            raise ValueError(
+                "Invalid stop bit specification: {!r}".format(self._stopbits)
+            )
         # setup parity
         iflag &= ~(termios.INPCK | termios.ISTRIP)
-        if self._parity == serial.PARITY_NONE:
+        if self._parity == Parity.NONE:
             cflag &= ~(termios.PARENB | termios.PARODD | CMSPAR)
-        elif self._parity == serial.PARITY_EVEN:
+        elif self._parity == Parity.EVEN:
             cflag &= ~(termios.PARODD | CMSPAR)
-            cflag |= (termios.PARENB)
-        elif self._parity == serial.PARITY_ODD:
+            cflag |= termios.PARENB
+        elif self._parity == Parity.ODD:
             cflag &= ~CMSPAR
-            cflag |= (termios.PARENB | termios.PARODD)
-        elif self._parity == serial.PARITY_MARK and CMSPAR:
-            cflag |= (termios.PARENB | CMSPAR | termios.PARODD)
-        elif self._parity == serial.PARITY_SPACE and CMSPAR:
-            cflag |= (termios.PARENB | CMSPAR)
+            cflag |= termios.PARENB | termios.PARODD
+        elif self._parity == Parity.MARK and CMSPAR:
+            cflag |= termios.PARENB | CMSPAR | termios.PARODD
+        elif self._parity == Parity.SPACE and CMSPAR:
+            cflag |= termios.PARENB | CMSPAR
             cflag &= ~(termios.PARODD)
         else:
-            raise ValueError('Invalid parity: {!r}'.format(self._parity))
+            raise ValueError("Invalid parity: {!r}".format(self._parity))
         # setup flow control
         # xonxoff
-        if hasattr(termios, 'IXANY'):
+        if hasattr(termios, "IXANY"):
             if self._xonxoff:
-                iflag |= (termios.IXON | termios.IXOFF)  # |termios.IXANY)
+                iflag |= termios.IXON | termios.IXOFF  # |termios.IXANY)
             else:
                 iflag &= ~(termios.IXON | termios.IXOFF | termios.IXANY)
         else:
             if self._xonxoff:
-                iflag |= (termios.IXON | termios.IXOFF)
+                iflag |= termios.IXON | termios.IXOFF
             else:
                 iflag &= ~(termios.IXON | termios.IXOFF)
         # rtscts
-        if hasattr(termios, 'CRTSCTS'):
+        if hasattr(termios, "CRTSCTS"):
             if self._rtscts:
-                cflag |= (termios.CRTSCTS)
+                cflag |= termios.CRTSCTS
             else:
                 cflag &= ~(termios.CRTSCTS)
-        elif hasattr(termios, 'CNEW_RTSCTS'):   # try it with alternate constant name
+        elif hasattr(termios, "CNEW_RTSCTS"):  # try it with alternate constant name
             if self._rtscts:
-                cflag |= (termios.CNEW_RTSCTS)
+                cflag |= termios.CNEW_RTSCTS
             else:
                 cflag &= ~(termios.CNEW_RTSCTS)
         # XXX should there be a warning if setting up rtscts (and xonxoff etc) fails??
@@ -513,18 +558,22 @@ class Serial(SerialBase, PlatformSpecific):
         # buffer
         # vmin "minimal number of characters to be read. 0 for non blocking"
         if vmin < 0 or vmin > 255:
-            raise ValueError('Invalid vmin: {!r}'.format(vmin))
+            raise ValueError("Invalid vmin: {!r}".format(vmin))
         cc[termios.VMIN] = vmin
         # vtime
         if vtime < 0 or vtime > 255:
-            raise ValueError('Invalid vtime: {!r}'.format(vtime))
+            raise ValueError("Invalid vtime: {!r}".format(vtime))
         cc[termios.VTIME] = vtime
         # activate settings
-        if force_update or [iflag, oflag, cflag, lflag, ispeed, ospeed, cc] != orig_attr:
+        if (
+            force_update
+            or [iflag, oflag, cflag, lflag, ispeed, ospeed, cc] != orig_attr
+        ):
             termios.tcsetattr(
                 self.fd,
                 termios.TCSANOW,
-                [iflag, oflag, cflag, lflag, ispeed, ospeed, cc])
+                [iflag, oflag, cflag, lflag, ispeed, ospeed, cc],
+            )
 
         # apply custom baud rate, if any
         if custom_baud is not None:
@@ -550,14 +599,14 @@ class Serial(SerialBase, PlatformSpecific):
     #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
 
     @property
-    def in_waiting(self):
+    def in_waiting(self) -> int:
         """Return the number of bytes currently in the input buffer."""
-        #~ s = fcntl.ioctl(self.fd, termios.FIONREAD, TIOCM_zero_str)
+        # ~ s = fcntl.ioctl(self.fd, termios.FIONREAD, TIOCM_zero_str)
         s = fcntl.ioctl(self.fd, TIOCINQ, TIOCM_zero_str)
-        return struct.unpack('I', s)[0]
+        return struct.unpack("I", s)[0]
 
     # select based implementation, proved to work on many systems
-    def read(self, size=1):
+    def read(self, size: int = 1) -> bytes:
         """\
         Read size bytes from the serial port. If a timeout is set it may
         return less characters as requested. With no timeout it will block
@@ -569,7 +618,9 @@ class Serial(SerialBase, PlatformSpecific):
         timeout = Timeout(self._timeout)
         while len(read) < size:
             try:
-                ready, _, _ = select.select([self.fd, self.pipe_abort_read_r], [], [], timeout.time_left())
+                ready, _, _ = select.select(
+                    [self.fd, self.pipe_abort_read_r], [], [], timeout.time_left()
+                )
                 if self.pipe_abort_read_r in ready:
                     os.read(self.pipe_abort_read_r, 1000)
                     break
@@ -578,20 +629,32 @@ class Serial(SerialBase, PlatformSpecific):
                 # For timeout == 0 (non-blocking operation) also abort when
                 # there is nothing to read.
                 if not ready:
-                    break   # timeout
+                    break  # timeout
                 buf = os.read(self.fd, size - len(read))
             except OSError as e:
                 # this is for Python 3.x where select.error is a subclass of
                 # OSError ignore BlockingIOErrors and EINTR. other errors are shown
                 # https://www.python.org/dev/peps/pep-0475.
-                if e.errno not in (errno.EAGAIN, errno.EALREADY, errno.EWOULDBLOCK, errno.EINPROGRESS, errno.EINTR):
-                    raise SerialException('read failed: {}'.format(e))
+                if e.errno not in (
+                    errno.EAGAIN,
+                    errno.EALREADY,
+                    errno.EWOULDBLOCK,
+                    errno.EINPROGRESS,
+                    errno.EINTR,
+                ):
+                    raise SerialException("read failed: {}".format(e))
             except select.error as e:
                 # this is for Python 2.x
                 # ignore BlockingIOErrors and EINTR. all errors are shown
                 # see also http://www.python.org/dev/peps/pep-3151/#select
-                if e[0] not in (errno.EAGAIN, errno.EALREADY, errno.EWOULDBLOCK, errno.EINPROGRESS, errno.EINTR):
-                    raise SerialException('read failed: {}'.format(e))
+                if e[0] not in (
+                    errno.EAGAIN,
+                    errno.EALREADY,
+                    errno.EWOULDBLOCK,
+                    errno.EINPROGRESS,
+                    errno.EINTR,
+                ):
+                    raise SerialException("read failed: {}".format(e))
             else:
                 # read should always return some data as select reported it was
                 # ready to read when we get to this point.
@@ -600,8 +663,9 @@ class Serial(SerialBase, PlatformSpecific):
                     # behavior that they are always ready to read immediately
                     # but reading returns nothing.
                     raise SerialException(
-                        'device reports readiness to read but returned no data '
-                        '(device disconnected or multiple access on port?)')
+                        "device reports readiness to read but returned no data "
+                        "(device disconnected or multiple access on port?)"
+                    )
                 read.extend(buf)
 
             if timeout.expired():
@@ -616,7 +680,7 @@ class Serial(SerialBase, PlatformSpecific):
         if self.is_open:
             os.write(self.pipe_abort_write_w, b"x")
 
-    def write(self, data):
+    def write(self, data: ReadableBuffer) -> None:
         """Output the given byte string over the serial port."""
         if not self.is_open:
             raise PortNotOpenError()
@@ -634,22 +698,26 @@ class Serial(SerialBase, PlatformSpecific):
                     # when timeout is set, use select to wait for being ready
                     # with the time left as timeout
                     if timeout.expired():
-                        raise SerialTimeoutException('Write timeout')
-                    abort, ready, _ = select.select([self.pipe_abort_write_r], [self.fd], [], timeout.time_left())
+                        raise SerialTimeoutException("Write timeout")
+                    abort, ready, _ = select.select(
+                        [self.pipe_abort_write_r], [self.fd], [], timeout.time_left()
+                    )
                     if abort:
                         os.read(self.pipe_abort_write_r, 1000)
                         break
                     if not ready:
-                        raise SerialTimeoutException('Write timeout')
+                        raise SerialTimeoutException("Write timeout")
                 else:
                     assert timeout.time_left() is None
                     # wait for write operation
-                    abort, ready, _ = select.select([self.pipe_abort_write_r], [self.fd], [], None)
+                    abort, ready, _ = select.select(
+                        [self.pipe_abort_write_r], [self.fd], [], None
+                    )
                     if abort:
                         os.read(self.pipe_abort_write_r, 1)
                         break
                     if not ready:
-                        raise SerialException('write failed (select)')
+                        raise SerialException("write failed (select)")
                 d = d[n:]
                 tx_len -= n
             except SerialException:
@@ -658,19 +726,31 @@ class Serial(SerialBase, PlatformSpecific):
                 # this is for Python 3.x where select.error is a subclass of
                 # OSError ignore BlockingIOErrors and EINTR. other errors are shown
                 # https://www.python.org/dev/peps/pep-0475.
-                if e.errno not in (errno.EAGAIN, errno.EALREADY, errno.EWOULDBLOCK, errno.EINPROGRESS, errno.EINTR):
-                    raise SerialException('write failed: {}'.format(e))
+                if e.errno not in (
+                    errno.EAGAIN,
+                    errno.EALREADY,
+                    errno.EWOULDBLOCK,
+                    errno.EINPROGRESS,
+                    errno.EINTR,
+                ):
+                    raise SerialException("write failed: {}".format(e))
             except select.error as e:
                 # this is for Python 2.x
                 # ignore BlockingIOErrors and EINTR. all errors are shown
                 # see also http://www.python.org/dev/peps/pep-3151/#select
-                if e[0] not in (errno.EAGAIN, errno.EALREADY, errno.EWOULDBLOCK, errno.EINPROGRESS, errno.EINTR):
-                    raise SerialException('write failed: {}'.format(e))
+                if e[0] not in (
+                    errno.EAGAIN,
+                    errno.EALREADY,
+                    errno.EWOULDBLOCK,
+                    errno.EINPROGRESS,
+                    errno.EINTR,
+                ):
+                    raise SerialException("write failed: {}".format(e))
             if not timeout.is_non_blocking and timeout.expired():
-                raise SerialTimeoutException('Write timeout')
+                raise SerialTimeoutException("Write timeout")
         return length - len(d)
 
-    def flush(self):
+    def flush(self) -> None:
         """\
         Flush of file like objects. In this case, wait until all data
         is written.
@@ -698,7 +778,7 @@ class Serial(SerialBase, PlatformSpecific):
             raise PortNotOpenError()
         termios.tcflush(self.fd, termios.TCOFLUSH)
 
-    def send_break(self, duration=0.25):
+    def send_break(self, duration: int | float = 0.25) -> None:
         """\
         Send break condition. Timed, returns to idle state after given
         duration.
@@ -727,7 +807,7 @@ class Serial(SerialBase, PlatformSpecific):
         if not self.is_open:
             raise PortNotOpenError()
         s = fcntl.ioctl(self.fd, TIOCMGET, TIOCM_zero_str)
-        return struct.unpack('I', s)[0] & TIOCM_CTS != 0
+        return struct.unpack("I", s)[0] & TIOCM_CTS != 0
 
     @property
     def dsr(self):
@@ -735,7 +815,7 @@ class Serial(SerialBase, PlatformSpecific):
         if not self.is_open:
             raise PortNotOpenError()
         s = fcntl.ioctl(self.fd, TIOCMGET, TIOCM_zero_str)
-        return struct.unpack('I', s)[0] & TIOCM_DSR != 0
+        return struct.unpack("I", s)[0] & TIOCM_DSR != 0
 
     @property
     def ri(self):
@@ -743,7 +823,7 @@ class Serial(SerialBase, PlatformSpecific):
         if not self.is_open:
             raise PortNotOpenError()
         s = fcntl.ioctl(self.fd, TIOCMGET, TIOCM_zero_str)
-        return struct.unpack('I', s)[0] & TIOCM_RI != 0
+        return struct.unpack("I", s)[0] & TIOCM_RI != 0
 
     @property
     def cd(self):
@@ -751,16 +831,16 @@ class Serial(SerialBase, PlatformSpecific):
         if not self.is_open:
             raise PortNotOpenError()
         s = fcntl.ioctl(self.fd, TIOCMGET, TIOCM_zero_str)
-        return struct.unpack('I', s)[0] & TIOCM_CD != 0
+        return struct.unpack("I", s)[0] & TIOCM_CD != 0
 
     # - - platform specific - - - -
 
     @property
     def out_waiting(self):
         """Return the number of bytes currently in the output buffer."""
-        #~ s = fcntl.ioctl(self.fd, termios.FIONREAD, TIOCM_zero_str)
+        # ~ s = fcntl.ioctl(self.fd, termios.FIONREAD, TIOCM_zero_str)
         s = fcntl.ioctl(self.fd, TIOCOUTQ, TIOCM_zero_str)
-        return struct.unpack('I', s)[0]
+        return struct.unpack("I", s)[0]
 
     def fileno(self):
         """\
@@ -800,7 +880,10 @@ class Serial(SerialBase, PlatformSpecific):
     def nonblocking(self):
         """DEPRECATED - has no use"""
         import warnings
-        warnings.warn("nonblocking() has no effect, already nonblocking", DeprecationWarning)
+
+        warnings.warn(
+            "nonblocking() has no effect, already nonblocking", DeprecationWarning
+        )
 
 
 class PosixPollSerial(Serial):
@@ -810,7 +893,9 @@ class PosixPollSerial(Serial):
     disconnecting while it's in use (e.g. USB-serial unplugged).
     """
 
-    def read(self, size=1):
+    pipe_abort_read_r: int
+
+    def read(self, size: int=1) -> bytes:
         """\
         Read size bytes from the serial port. If a timeout is set it may
         return less characters as requested. With no timeout it will block
@@ -821,17 +906,24 @@ class PosixPollSerial(Serial):
         read = bytearray()
         timeout = Timeout(self._timeout)
         poll = select.poll()
-        poll.register(self.fd, select.POLLIN | select.POLLERR | select.POLLHUP | select.POLLNVAL)
-        poll.register(self.pipe_abort_read_r, select.POLLIN | select.POLLERR | select.POLLHUP | select.POLLNVAL)
+        poll.register(
+            self.fd, select.POLLIN | select.POLLERR | select.POLLHUP | select.POLLNVAL
+        )
+        poll.register(
+            self.pipe_abort_read_r,
+            select.POLLIN | select.POLLERR | select.POLLHUP | select.POLLNVAL,
+        )
         if size > 0:
             while len(read) < size:
                 # print "\tread(): size",size, "have", len(read)    #debug
                 # wait until device becomes ready to read (or something fails)
-                for fd, event in poll.poll(None if timeout.is_infinite else (timeout.time_left() * 1000)):
+                for fd, event in poll.poll(
+                    None if timeout.is_infinite else (timeout.time_left() * 1000)
+                ):
                     if fd == self.pipe_abort_read_r:
                         break
                     if event & (select.POLLERR | select.POLLHUP | select.POLLNVAL):
-                        raise SerialException('device reports error (poll)')
+                        raise SerialException("device reports error (poll)")
                     #  we don't care if it is select.POLLIN or timeout, that's
                     #  handled below
                 if fd == self.pipe_abort_read_r:
@@ -839,9 +931,15 @@ class PosixPollSerial(Serial):
                     break
                 buf = os.read(self.fd, size - len(read))
                 read.extend(buf)
-                if timeout.expired() \
-                        or (self._inter_byte_timeout is not None and self._inter_byte_timeout > 0) and not buf:
-                    break   # early abort on timeout
+                if (
+                    timeout.expired()
+                    or (
+                        self._inter_byte_timeout is not None
+                        and self._inter_byte_timeout > 0
+                    )
+                    and not buf
+                ):
+                    break  # early abort on timeout
         return bytes(read)
 
 
@@ -857,7 +955,7 @@ class VTIMESerial(Serial):
     just ignore that.
     """
 
-    def _reconfigure_port(self, force_update=True):
+    def _reconfigure_port(self, force_update: bool = True) -> None:
         """Set communication parameters on opened port."""
         super(VTIMESerial, self)._reconfigure_port()
         fcntl.fcntl(self.fd, fcntl.F_SETFL, 0)  # clear O_NONBLOCK
@@ -874,20 +972,19 @@ class VTIMESerial(Serial):
         try:
             orig_attr = termios.tcgetattr(self.fd)
             iflag, oflag, cflag, lflag, ispeed, ospeed, cc = orig_attr
-        except termios.error as msg:      # if a port is nonexistent but has a /dev file, it'll fail here
+        except termios.error as msg:  # if a port is nonexistent but has a /dev file, it'll fail here
             raise serial.SerialException("Could not configure port: {}".format(msg))
 
         if vtime < 0 or vtime > 255:
-            raise ValueError('Invalid vtime: {!r}'.format(vtime))
+            raise ValueError("Invalid vtime: {!r}".format(vtime))
         cc[termios.VTIME] = vtime
         cc[termios.VMIN] = vmin
 
         termios.tcsetattr(
-                self.fd,
-                termios.TCSANOW,
-                [iflag, oflag, cflag, lflag, ispeed, ospeed, cc])
+            self.fd, termios.TCSANOW, [iflag, oflag, cflag, lflag, ispeed, ospeed, cc]
+        )
 
-    def read(self, size=1):
+    def read(self, size: int = 1) -> bytes:
         """\
         Read size bytes from the serial port. If a timeout is set it may
         return less characters as requested. With no timeout it will block
